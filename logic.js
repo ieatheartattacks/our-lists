@@ -146,7 +146,7 @@ export function listLook(list) {
   return { key, c1, c2, emoji: (list && list.emoji) || DEFAULT_EMOJI };
 }
 
-function dayString(now) {
+export function dayString(now) {
   const p = (n) => String(n).padStart(2, "0");
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
@@ -181,4 +181,91 @@ export function firstSymbol(text) {
     return first.done ? "" : first.value.segment;
   }
   return Array.from(s).slice(0, 2).join("");
+}
+
+/* ---------- Today / next 7 days ---------- */
+
+function parseDay(str) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str || "");
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+
+// Tasks with due dates from every list, grouped for the Today / Next 7 days screens.
+// Overdue tasks come first, then one group per day (empty days are kept so the
+// week reads like a calendar). tab "today" shows just today; anything else shows
+// 7 days starting today. Finished tasks are hidden unless listed in keepIds
+// (so a task you just checked off stays visible, crossed out, until you leave).
+export function agendaGroups(tasks, lists, now = new Date(), tab = "week", keepIds = new Set()) {
+  const todayStr = dayString(now);
+  const listById = new Map(lists.map((l) => [l.id, l]));
+  const listOrder = new Map(lists.map((l, i) => [l.id, i]));
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  const items = [];
+  for (const t of tasks) {
+    if (!t.due || !parseDay(t.due)) continue;
+    if (t.done && !keepIds.has(t.id)) continue;
+    const list = listById.get(t.listId);
+    if (!list) continue;
+    const parent = t.parentId ? taskById.get(t.parentId) : null;
+    if (t.parentId && !parent) continue;
+    items.push({ task: t, list, parent });
+  }
+  const cmp = (a, b) =>
+    (listOrder.get(a.list.id) - listOrder.get(b.list.id)) || ((a.task.order || 0) - (b.task.order || 0));
+
+  const groups = [];
+  const overdue = items
+    .filter((i) => i.task.due < todayStr)
+    .sort((a, b) => a.task.due.localeCompare(b.task.due) || cmp(a, b));
+  if (overdue.length) groups.push({ key: "overdue", label: "Overdue", date: "", status: "overdue", items: overdue });
+
+  const days = tab === "today" ? 1 : 7;
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    const key = dayString(d);
+    groups.push({
+      key,
+      label: i === 0 ? "Today" : i === 1 ? "Tomorrow" : d.toLocaleDateString("en-US", { weekday: "long" }),
+      date: d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }),
+      status: i === 0 ? "today" : "day",
+      items: items.filter((x) => x.task.due === key).sort(cmp)
+    });
+  }
+  return groups;
+}
+
+// Numbers for the home screen cards and screen headers.
+export function agendaCounts(tasks, lists, now = new Date()) {
+  const sum = (groups) => groups.filter((g) => g.key !== "overdue").reduce((n, g) => n + g.items.length, 0);
+  const week = agendaGroups(tasks, lists, now, "week");
+  const overdueGroup = week.find((g) => g.key === "overdue");
+  return {
+    today: sum(agendaGroups(tasks, lists, now, "today")),
+    week: sum(week),
+    overdue: overdueGroup ? overdueGroup.items.length : 0
+  };
+}
+
+/* ---------- Google Calendar export ---------- */
+
+// Link that opens Google Calendar's "new event" screen, pre-filled as an
+// all-day event on the task's due date. Returns null if there is no valid due date.
+export function googleCalendarUrl({ text, due, note }, listName = "") {
+  const start = parseDay(due);
+  if (!start) return null;
+  const end = new Date(start);
+  end.setDate(start.getDate() + 1); // all-day events end on the following day
+  const ymd = (d) => dayString(d).replace(/-/g, "");
+  const details = [
+    String(note ?? "").trim(),
+    listName ? `From the list "${listName}" in Our Lists` : ""
+  ].filter(Boolean).join("\n\n");
+  let url =
+    "https://calendar.google.com/calendar/render?action=TEMPLATE" +
+    "&text=" + encodeURIComponent(String(text || "Task").trim()) +
+    "&dates=" + ymd(start) + "/" + ymd(end);
+  if (details) url += "&details=" + encodeURIComponent(details);
+  return url;
 }

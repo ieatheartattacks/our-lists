@@ -10,7 +10,7 @@ import { firebaseConfig } from "./firebase-config.js";
 import {
   esc, sortLists, groupTasks, openCount, findListByName, parseAddParams,
   idsToDelete, toggleChanges, formatDue, firstLine,
-  LIST_COLORS, ACCENT_KEYS, listLook, listStats, greeting, firstSymbol
+  LIST_COLORS, ACCENT_KEYS, listLook, listStats, greeting, firstSymbol, agendaGroups, agendaCounts, googleCalendarUrl
 } from "./logic.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -53,7 +53,8 @@ const state = {
   showDone: {},
   enter: true,       // play the entrance animation on the next real render
   pop: null,         // id of the task whose checkbox just changed
-  pendingListId: null
+  pendingListId: null,
+  agendaDone: new Set() // tasks checked off while viewing Today / Next 7 days (kept visible until you leave)
 };
 let shellBuilt = false;
 let unsubLists = null;
@@ -88,6 +89,8 @@ const setSort = (listId, mode) => lsSet("sort:" + listId, mode);
 /* ---------- Routing ---------- */
 
 function parseRoute() {
+  const a = location.hash.match(/^#a=(today|week)$/);
+  if (a) return { view: "agenda", tab: a[1], listId: null };
   const m = location.hash.match(/^#l=(.+)$/);
   return m ? { view: "list", listId: decodeURIComponent(m[1]) } : { view: "lists", listId: null };
 }
@@ -95,7 +98,9 @@ function go(listId) {
   location.hash = listId ? "#l=" + encodeURIComponent(listId) : "";
 }
 window.addEventListener("hashchange", () => {
+  const prevView = state.route.view;
   state.route = parseRoute();
+  if (state.route.view === "agenda" && prevView !== "agenda") state.agendaDone.clear();
   state.composer = { mode: "task", parentId: null };
   state.enter = true;
   renderAll();
@@ -172,6 +177,21 @@ const detText = $("#detailText");
 const detDue = $("#detailDue");
 const detNote = $("#detailNote");
 
+// Opens Google Calendar with this task pre-filled as an all-day event.
+function openCalendar(fields, listId) {
+  const list = state.lists.find((l) => l.id === listId);
+  const url = googleCalendarUrl(fields, list ? list.name : "");
+  if (!url) return false;
+  const a = document.createElement("a");
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  return true;
+}
+
 function openDetails(task) {
   detText.value = task.text;
   detDue.value = task.due || "";
@@ -187,6 +207,14 @@ function openDetails(task) {
       });
       on($("#detailCancel"), "click", () => finish(null));
       on($("#detailClearDue"), "click", () => { detDue.value = ""; });
+      on($("#detailCal"), "click", () => {
+        const fields = { text: detText.value.trim() || task.text, due: detDue.value, note: detNote.value };
+        if (!openCalendar(fields, task.listId)) {
+          // No date yet: take her to the date field instead of failing silently.
+          detDue.focus();
+          if (detDue.showPicker) { try { detDue.showPicker(); } catch { /* needs a tap on some browsers */ } }
+        }
+      });
     }
   });
 }
@@ -426,7 +454,8 @@ function toggleTask(id) {
   if (t && !t.done) {
     state.pop = id;
     if (navigator.vibrate) navigator.vibrate(8);
-    if (!t.parentId && openCount(state.tasks, t.listId) === 1) confetti();
+    if (state.route.view === "list" && !t.parentId && openCount(state.tasks, t.listId) === 1) confetti();
+    if (state.route.view === "agenda") changes.forEach((c) => c.done && state.agendaDone.add(c.id));
   }
   const batch = writeBatch(db);
   for (const c of changes) batch.update(doc(db, "tasks", c.id), { done: c.done, doneAt: c.doneAt });
@@ -513,6 +542,33 @@ function renderHeader() {
   if (!h) return;
   const offline = navigator.onLine ? "" : '<span class="chip">Offline</span>';
 
+  if (state.route.view === "agenda") {
+    app.style.removeProperty("--c1");
+    app.style.removeProperty("--c2");
+    const tab = state.route.tab;
+    let sub = "";
+    if (state.listsReady && state.tasksReady) {
+      const c = agendaCounts(state.tasks, state.lists);
+      const n = tab === "today" ? c.today : c.week;
+      const what = tab === "today" ? "due today" : "due this week";
+      sub = n ? `${n} ${what}` : "Nothing due";
+      if (c.overdue) sub += ` · ${c.overdue} overdue`;
+    }
+    h.innerHTML = `<div class="banner">
+      <div class="banner-top">
+        <button class="icon-btn light back-btn" data-action="back" aria-label="Back to lists">‹ Lists</button>
+        <span class="spacer"></span>${offline ? offline.replace("chip", "chip light") : ""}
+      </div>
+      <div class="banner-title"><span class="big-emoji">${tab === "today" ? "☀️" : "📅"}</span><h1>${tab === "today" ? "Today" : "Next 7 days"}</h1></div>
+      <div class="banner-sub">${esc(sub)}</div>
+      <div class="segmented on-banner">
+        <button type="button" data-action="agendaTab" data-tab="today" aria-pressed="${tab === "today"}">Today</button>
+        <button type="button" data-action="agendaTab" data-tab="week" aria-pressed="${tab === "week"}">Next 7 days</button>
+      </div>
+    </div>`;
+    return;
+  }
+
   if (state.route.view === "lists") {
     app.style.removeProperty("--c1");
     app.style.removeProperty("--c2");
@@ -561,10 +617,11 @@ function renderHeader() {
   }
 }
 
-function rowHtml(t, isSub) {
+function rowHtml(t, isSub, opts = {}) {
   const cls = isSub ? "sub" : "task";
-  const due = t.due ? formatDue(t.due) : null;
+  const due = t.due && !opts.hideDue ? formatDue(t.due) : null;
   const meta = [];
+  if (opts.extra) meta.push(opts.extra);
   if (due) meta.push(`<span class="due ${t.done ? "later" : due.status}">${esc(due.label)}</span>`);
   if (t.note) meta.push(`<span class="note-preview">${esc(firstLine(t.note))}</span>`);
   return `<div class="${cls} ${t.done ? "is-done" : ""}">
@@ -572,6 +629,14 @@ function rowHtml(t, isSub) {
     <div class="task-text" data-action="details" data-id="${t.id}">
       <div>${esc(t.text)}</div>${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
     </div>`;
+}
+
+function agendaItemHtml({ task: t, list, parent }, i, hideDue) {
+  const look = listLook(list);
+  const chip = `<span class="list-chip">${esc(look.emoji)} ${esc(list.name)}</span>`;
+  const via = parent ? `<span class="note-preview">↳ ${esc(parent.text)}</span>` : "";
+  return `<li class="task-block" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}">${rowHtml(t, false, { hideDue, extra: chip + via })}
+      <button class="more" data-action="taskMenu" data-id="${t.id}" aria-label="More options">⋯</button></div></li>`;
 }
 
 function blockHtml(g, i) {
@@ -602,6 +667,30 @@ function renderContent() {
     return;
   }
 
+  if (state.route.view === "agenda") {
+    const enter = state.enter;
+    state.enter = false;
+    const groups = agendaGroups(state.tasks, state.lists, new Date(), state.route.tab, state.agendaDone);
+    const total = groups.reduce((n, g) => n + g.items.length, 0);
+    if (!total && state.route.tab === "today") {
+      c.innerHTML = '<div class="empty"><span class="big">🎉</span>Nothing due today.<br>Enjoy the breathing room.</div>';
+      return;
+    }
+    let i = 0;
+    c.innerHTML = `<div class="agenda ${enter ? "enter" : ""}">${groups
+      .map(
+        (g) => `<section class="agenda-day ${g.status}">
+          <div class="agenda-head"><span class="day-name">${esc(g.label)}</span>${g.date ? `<span class="day-date">${esc(g.date)}</span>` : ""}${g.items.length ? `<span class="day-count">${g.items.length}</span>` : ""}</div>
+          ${g.items.length
+            ? `<ul class="tasks">${g.items.map((it) => agendaItemHtml(it, i++, g.status !== "overdue")).join("")}</ul>`
+            : '<div class="day-empty">Nothing due</div>'}
+        </section>`
+      )
+      .join("")}</div>`;
+    state.pop = null;
+    return;
+  }
+
   if (state.route.view === "lists") {
     if (!state.lists.length) {
       c.innerHTML = '<div class="empty"><span class="big">🗒️</span>No lists yet.<br>Tap “New list” to start one.</div>';
@@ -609,7 +698,17 @@ function renderContent() {
     }
     const enter = state.enter;
     state.enter = false;
-    c.innerHTML = `<div class="tiles ${enter ? "enter" : ""}">${state.lists
+    const ac = agendaCounts(state.tasks, state.lists);
+    const smart = `<div class="smart ${enter ? "enter" : ""}">
+      <button class="smart-card" data-action="openAgenda" data-tab="today" style="--c1:#ff7a59;--c2:#ff3d81">
+        <span class="smart-icon">☀️</span><span class="smart-count">${ac.today}</span>
+        <span class="smart-label">Due today</span>
+        ${ac.overdue ? `<span class="smart-warn">${ac.overdue} overdue</span>` : ""}</button>
+      <button class="smart-card" data-action="openAgenda" data-tab="week" style="--c1:#0ea5e9;--c2:#6366f1">
+        <span class="smart-icon">📅</span><span class="smart-count">${ac.week}</span>
+        <span class="smart-label">Next 7 days</span></button>
+    </div>`;
+    c.innerHTML = `${smart}<div class="tiles ${enter ? "enter" : ""}">${state.lists
       .map((l, i) => {
         const look = listLook(l);
         const s = listStats(state.tasks, l.id);
@@ -660,6 +759,8 @@ function renderContent() {
 function renderComposer() {
   const c = $("#composer");
   if (!c) return;
+  c.hidden = state.route.view === "agenda";
+  if (state.route.view === "agenda") { c.innerHTML = ""; return; }
   if (state.route.view === "lists") {
     c.innerHTML = '<button class="btn-primary btn-block" data-action="newList">＋ New list</button>';
     return;
@@ -720,6 +821,8 @@ app.addEventListener("click", async (e) => {
 
   switch (el.dataset.action) {
     case "openList": go(id); break;
+    case "openAgenda": location.hash = "#a=" + el.dataset.tab; break;
+    case "agendaTab": location.replace("#a=" + el.dataset.tab); break;
     case "back": go(null); break;
     case "toggle": toggleTask(id); break;
     case "toggleDone": {
@@ -744,8 +847,19 @@ app.addEventListener("click", async (e) => {
     }
     case "taskMenu": {
       if (!task) break;
-      const items = [{ label: "Edit details (due date, note)", run: () => editDetails(task) }];
-      if (!task.parentId) {
+      const items = [
+        { label: "Edit details (due date, note)", run: () => editDetails(task) },
+        {
+          label: "Add to Google Calendar",
+          run: () => {
+            if (!openCalendar(task, task.listId)) toast("Add a due date first. Tap the task to set one.", 4000);
+          }
+        }
+      ];
+      if (state.route.view === "agenda") {
+        items.push({ label: "Open list", run: () => go(task.listId) });
+      }
+      if (!task.parentId && state.route.view === "list") {
         items.push({
           label: "Add subtask",
           run: () => {
