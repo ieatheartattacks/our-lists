@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Only the two of you. Replace both emails with the exact sign-in emails.
+    function allowed() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'YOUR_EMAIL@example.com',
+          'TYLER_EMAIL@example.com'
+        ];
+    }
+
+    match /lists/{id} {
+      allow read, write: if allowed();
+    }
+    match /tasks/{id} {
+      allow read, write: if allowed();
+    }
+  }
+}

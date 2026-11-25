@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Our Lists</title>
+  <meta name="theme-color" content="#2f6fed">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Our Lists">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" aria-live="polite"></div>
+  <div id="toast" role="status"></div>
+  <dialog id="dialog">
+    <form method="dialog" id="dialogForm">
+      <h2 id="dialogTitle"></h2>
+      <p id="dialogMsg"></p>
+      <input id="dialogInput" type="text" autocomplete="off" autocapitalize="sentences" maxlength="200">
+      <div class="dialog-buttons">
+        <button type="button" id="dialogCancel" class="btn-ghost">Cancel</button>
+        <button type="submit" id="dialogOk" class="btn-primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="sheet">
+    <div id="sheetBody"></div>
+  </dialog>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
