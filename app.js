@@ -10,7 +10,7 @@ import { firebaseConfig } from "./firebase-config.js";
 import {
   esc, sortLists, groupTasks, openCount, findListByName, parseAddParams,
   idsToDelete, toggleChanges, formatDue, firstLine,
-  LIST_COLORS, ACCENT_KEYS, listLook, listStats, greeting, firstSymbol, agendaGroups, agendaCounts, googleCalendarUrl
+  LIST_COLORS, ACCENT_KEYS, listLook, listStats, greeting, firstSymbol, agendaGroups, agendaCounts, googleCalendarUrl, canSee, canMakePrivate
 } from "./logic.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -43,7 +43,7 @@ if (pendingAdd) history.replaceState(null, "", location.pathname + location.hash
 
 const state = {
   user: undefined, // undefined = still checking, null = signed out
-  lists: [],
+  lists: [],      // lists this person can see (shared ones, plus their own private ones)
   tasks: [],
   listsReady: false,
   tasksReady: false,
@@ -238,6 +238,9 @@ const EMOJIS = ["🛒", "🏠", "🧹", "🐱", "📚", "✈️", "🎁", "🍳"
 function openListEditor({ title, list }) {
   const keys = Object.keys(LIST_COLORS);
   let color = list ? listLook(list).key : keys[state.lists.length % keys.length];
+  let priv = !!(list && list.private);
+  const me = state.user && state.user.email;
+  const lockedShared = !!list && !list.private && !canMakePrivate(list, me); // someone else's shared list
   $("#listDialogTitle").textContent = title;
   listName.value = list ? list.name : "";
   listEmoji.value = list && list.emoji ? list.emoji : "";
@@ -251,6 +254,17 @@ function openListEditor({ title, list }) {
       .join("");
   };
   drawColors();
+  const drawVis = () => {
+    $("#visPicks").innerHTML = [[false, "Shared"], [true, "Only me"]]
+      .map(([val, label]) => `<button type="button" data-priv="${val}" aria-pressed="${priv === val}" ${val && lockedShared ? "disabled" : ""}>${val ? "🔒 " : "👥 "}${label}</button>`)
+      .join("");
+    $("#visHint").textContent = lockedShared
+      ? "Only the person who created this list can make it private."
+      : priv
+        ? "Hidden from the other person's app, including their Today and week views."
+        : "Both of you can see and edit this list.";
+  };
+  drawVis();
   return modal(listDlg, {
     onOpen: () => { if (list) listDlg.focus(); else listName.focus(); },
     setup: ({ on, finish }) => {
@@ -262,11 +276,15 @@ function openListEditor({ title, list }) {
         const b = e.target.closest("[data-color]");
         if (b) { color = b.dataset.color; drawColors(); }
       });
+      on($("#visPicks"), "click", (e) => {
+        const b = e.target.closest("[data-priv]");
+        if (b && !b.disabled) { priv = b.dataset.priv === "true"; drawVis(); }
+      });
       on($("#listForm"), "submit", (e) => {
         e.preventDefault();
         const name = listName.value.trim();
         if (!name) { listName.focus(); return; }
-        finish({ name, emoji: firstSymbol(listEmoji.value), color });
+        finish({ name, emoji: firstSymbol(listEmoji.value), color, private: priv });
       });
       on($("#listCancel"), "click", () => finish(null));
     }
@@ -368,7 +386,8 @@ function startListeners() {
   unsubLists = onSnapshot(
     query(collection(db, "lists")),
     (snap) => {
-      state.lists = sortLists(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      const me = state.user && state.user.email;
+      state.lists = sortLists(snap.docs.map((d) => ({ id: d.id, ...d.data() }))).filter((l) => canSee(l, me));
       state.listsReady = true;
       state.fatal = null;
       processPendingAdd(snap.metadata.fromCache);
@@ -419,9 +438,9 @@ function processPendingAdd(fromCache) {
 
 /* ---------- Data actions (writes are not awaited, so the UI stays instant offline) ---------- */
 
-function addList({ name, emoji, color }) {
+function addList({ name, emoji, color, private: isPrivate }) {
   const ref = doc(collection(db, "lists"));
-  setDoc(ref, { name, emoji, color, order: Date.now(), createdBy: state.user.email }).catch(handleError);
+  setDoc(ref, { name, emoji, color, private: !!isPrivate, order: Date.now(), createdBy: state.user.email }).catch(handleError);
   return ref.id;
 }
 function updateList(id, fields) {
@@ -604,7 +623,7 @@ function renderHeader() {
     h.innerHTML = `<div class="banner">
       <div class="banner-top">
         <button class="icon-btn light back-btn" data-action="back" aria-label="Back to lists">‹ Lists</button>
-        <span class="spacer"></span>${offline ? offline.replace("chip", "chip light") : ""}
+        <span class="spacer"></span>${list.private ? '<span class="chip light">🔒 Only you</span>' : ""}${offline ? offline.replace("chip", "chip light") : ""}
         <button class="icon-btn light" data-action="listMenu" aria-label="List options">⋯</button>
       </div>
       <div class="banner-title"><span class="big-emoji">${esc(look.emoji)}</span><h1>${esc(list.name)}</h1></div>
@@ -712,7 +731,7 @@ function renderContent() {
       .map((l, i) => {
         const look = listLook(l);
         const s = listStats(state.tasks, l.id);
-        const meta = !s.total ? "Empty" : s.open ? `${s.open} to do` : "All done ✓";
+        const meta = (l.private ? "🔒 " : "") + (!s.total ? "Empty" : s.open ? `${s.open} to do` : "All done ✓");
         const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
         return `<button class="tile" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}" data-action="openList" data-id="${l.id}">
           ${s.overdue ? `<span class="tile-badge">${s.overdue} overdue</span>` : ""}
@@ -903,6 +922,10 @@ app.addEventListener("click", async (e) => {
             if (r.name !== list.name) changes.name = r.name;
             if (r.emoji !== (list.emoji || "")) changes.emoji = r.emoji;
             if (r.color !== list.color) changes.color = r.color;
+            if (r.private !== !!list.private) {
+              changes.private = r.private;
+              if (r.private && !list.createdBy) changes.createdBy = state.user.email;
+            }
             if (Object.keys(changes).length) updateList(list.id, changes);
           }
         },

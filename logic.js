@@ -269,3 +269,19 @@ export function googleCalendarUrl({ text, due, note }, listName = "") {
   if (details) url += "&details=" + encodeURIComponent(details);
   return url;
 }
+
+/* ---------- Shared / private lists ---------- */
+
+// A private list is only visible to the person who created it.
+export function canSee(list, email) {
+  if (!list || !list.private) return true;
+  return !!email && list.createdBy === email;
+}
+
+// Only the creator may make a shared list private, otherwise one person could
+// hide the other's list from them. Lists with no recorded creator (made before
+// this feature) can be claimed by whoever edits them.
+export function canMakePrivate(list, email) {
+  if (!list || !list.createdBy) return true;
+  return list.createdBy === email;
+}
