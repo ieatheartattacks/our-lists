@@ -9,7 +9,8 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 import {
   esc, sortLists, groupTasks, openCount, findListByName, parseAddParams,
-  idsToDelete, toggleChanges, formatDue, firstLine
+  idsToDelete, toggleChanges, formatDue, firstLine,
+  LIST_COLORS, ACCENT_KEYS, listLook, listStats, greeting, firstSymbol
 } from "./logic.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -49,11 +50,40 @@ const state = {
   fatal: null,
   route: parseRoute(),
   composer: { mode: "task", parentId: null },
-  showDone: {}
+  showDone: {},
+  enter: true,       // play the entrance animation on the next real render
+  pop: null,         // id of the task whose checkbox just changed
+  pendingListId: null
 };
 let shellBuilt = false;
 let unsubLists = null;
 let unsubTasks = null;
+
+/* ---------- Device settings (theme, sort) ---------- */
+
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* ignore */ }
+}
+const getMode = () => (["auto", "light", "dark"].includes(lsGet("theme-mode")) ? lsGet("theme-mode") : "auto");
+const getAccent = () => (ACCENT_KEYS.includes(lsGet("theme-accent")) ? lsGet("theme-accent") : "grape");
+
+function applyTheme() {
+  const [c1, c2] = LIST_COLORS[getAccent()];
+  const root = document.documentElement;
+  root.dataset.mode = getMode();
+  root.style.setProperty("--accent", c1);
+  root.style.setProperty("--accent2", c2);
+  const meta = $("#themeColorMeta");
+  if (meta) meta.setAttribute("content", c1);
+}
+applyTheme();
+
+// Sort choice (added order vs due date) is remembered per list on this phone.
+const getSort = (listId) => (lsGet("sort:" + listId) === "due" ? "due" : "added");
+const setSort = (listId, mode) => lsSet("sort:" + listId, mode);
 
 /* ---------- Routing ---------- */
 
@@ -67,6 +97,7 @@ function go(listId) {
 window.addEventListener("hashchange", () => {
   state.route = parseRoute();
   state.composer = { mode: "task", parentId: null };
+  state.enter = true;
   renderAll();
 });
 
@@ -90,6 +121,27 @@ function handleError(err) {
   }
 }
 
+// Generic "ask, then resolve once" dialog helper used by every popup window.
+function modal(dialog, { onOpen, setup }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const cleanups = [];
+    const on = (el, ev, fn) => { el.addEventListener(ev, fn); cleanups.push(() => el.removeEventListener(ev, fn)); };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanups.forEach((c) => c());
+      if (dialog.open) dialog.close();
+      resolve(result);
+    };
+    on(dialog, "cancel", () => finish(null));
+    on(dialog, "close", () => finish(null));
+    setup({ on, finish });
+    dialog.showModal();
+    onOpen && onOpen();
+  });
+}
+
 const dlg = $("#dialog");
 const dlgForm = $("#dialogForm");
 const dlgTitle = $("#dialogTitle");
@@ -98,99 +150,44 @@ const dlgInput = $("#dialogInput");
 const dlgOk = $("#dialogOk");
 const dlgCancel = $("#dialogCancel");
 
-// Shows the dialog. Resolves to the typed text (input dialogs), true (confirm
-// dialogs), or null if cancelled.
-function openDialog({ title, message = "", input = false, value = "", okLabel = "OK", danger = false, placeholder = "" }) {
-  return new Promise((resolve) => {
-    dlgTitle.textContent = title;
-    dlgMsg.textContent = message;
-    dlgMsg.hidden = !message;
-    dlgInput.hidden = !input;
-    dlgInput.value = value;
-    dlgInput.placeholder = placeholder;
-    dlgOk.textContent = okLabel;
-    dlgOk.className = danger ? "btn-danger" : "btn-primary";
-
-    let settled = false;
-    const cleanup = () => {
-      dlgForm.removeEventListener("submit", onSubmit);
-      dlgCancel.removeEventListener("click", onCancel);
-      dlg.removeEventListener("cancel", onCancel);
-      dlg.removeEventListener("close", onCancel);
-    };
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (dlg.open) dlg.close();
-      resolve(result);
-    };
-    function onSubmit(e) {
-      e.preventDefault();
-      const v = dlgInput.value.trim();
-      finish(input ? v || null : true);
+// Confirm box. Resolves true if confirmed, null if cancelled.
+function confirmBox(title, message, okLabel = "Delete") {
+  dlgTitle.textContent = title;
+  dlgMsg.textContent = message;
+  dlgMsg.hidden = !message;
+  dlgInput.hidden = true;
+  dlgOk.textContent = okLabel;
+  dlgOk.className = "btn-danger";
+  return modal(dlg, {
+    setup: ({ on, finish }) => {
+      on(dlgForm, "submit", (e) => { e.preventDefault(); finish(true); });
+      on(dlgCancel, "click", () => finish(null));
     }
-    function onCancel() { finish(null); }
-
-    dlgForm.addEventListener("submit", onSubmit);
-    dlgCancel.addEventListener("click", onCancel);
-    dlg.addEventListener("cancel", onCancel);
-    dlg.addEventListener("close", onCancel);
-    dlg.showModal();
-    if (input) { dlgInput.focus(); dlgInput.select(); }
   });
 }
-const askText = (title, value = "", okLabel = "Save") =>
-  openDialog({ title, input: true, value, okLabel });
-const confirmBox = (title, message, okLabel = "Delete") =>
-  openDialog({ title, message, okLabel, danger: true });
 
+// Edit a task's text, due date and note. Resolves to { text, due, note } or null.
 const detDlg = $("#detailDialog");
-const detForm = $("#detailForm");
 const detText = $("#detailText");
 const detDue = $("#detailDue");
 const detNote = $("#detailNote");
-const detCancel = $("#detailCancel");
-const detClear = $("#detailClearDue");
 
-// Edit a task's text, due date and note. Resolves to { text, due, note } or null.
 function openDetails(task) {
-  return new Promise((resolve) => {
-    detText.value = task.text;
-    detDue.value = task.due || "";
-    detNote.value = task.note || "";
-
-    let settled = false;
-    const cleanup = () => {
-      detForm.removeEventListener("submit", onSubmit);
-      detCancel.removeEventListener("click", onCancel);
-      detClear.removeEventListener("click", onClear);
-      detDlg.removeEventListener("cancel", onCancel);
-      detDlg.removeEventListener("close", onCancel);
-    };
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (detDlg.open) detDlg.close();
-      resolve(result);
-    };
-    function onSubmit(e) {
-      e.preventDefault();
-      const text = detText.value.trim();
-      if (!text) { detText.focus(); return; }
-      finish({ text, due: detDue.value || null, note: detNote.value.trim() });
+  detText.value = task.text;
+  detDue.value = task.due || "";
+  detNote.value = task.note || "";
+  return modal(detDlg, {
+    onOpen: () => detDlg.focus(), // don't pop the phone keyboard open until a field is tapped
+    setup: ({ on, finish }) => {
+      on($("#detailForm"), "submit", (e) => {
+        e.preventDefault();
+        const text = detText.value.trim();
+        if (!text) { detText.focus(); return; }
+        finish({ text, due: detDue.value || null, note: detNote.value.trim() });
+      });
+      on($("#detailCancel"), "click", () => finish(null));
+      on($("#detailClearDue"), "click", () => { detDue.value = ""; });
     }
-    function onCancel() { finish(null); }
-    function onClear() { detDue.value = ""; }
-
-    detForm.addEventListener("submit", onSubmit);
-    detCancel.addEventListener("click", onCancel);
-    detClear.addEventListener("click", onClear);
-    detDlg.addEventListener("cancel", onCancel);
-    detDlg.addEventListener("close", onCancel);
-    detDlg.showModal();
-    detDlg.focus(); // don't pop the phone keyboard open until she taps a field
   });
 }
 
@@ -204,12 +201,80 @@ async function editDetails(task) {
   if (Object.keys(changes).length) updateTask(task.id, changes);
 }
 
-// Sort choice (added order vs due date) is remembered per list on this phone.
-function getSort(listId) {
-  try { return localStorage.getItem("sort:" + listId) === "due" ? "due" : "added"; } catch { return "added"; }
+// Create or edit a list: name, icon and color. Resolves to { name, emoji, color } or null.
+const listDlg = $("#listDialog");
+const listName = $("#listName");
+const listEmoji = $("#listEmoji");
+const EMOJIS = ["🛒", "🏠", "🧹", "🐱", "📚", "✈️", "🎁", "🍳", "💼", "💊", "🌿", "🎬", "🧾", "🐶", "🛠️", "🎉"];
+
+function openListEditor({ title, list }) {
+  const keys = Object.keys(LIST_COLORS);
+  let color = list ? listLook(list).key : keys[state.lists.length % keys.length];
+  $("#listDialogTitle").textContent = title;
+  listName.value = list ? list.name : "";
+  listEmoji.value = list && list.emoji ? list.emoji : "";
+  listEmoji.placeholder = "📋 Type or pick an emoji";
+  $("#listSave").textContent = list ? "Save" : "Create";
+  $("#emojiPicks").innerHTML = EMOJIS.map((e) => `<button type="button" data-emoji="${e}" aria-label="Use ${e}">${e}</button>`).join("");
+  const drawColors = () => {
+    $("#colorPicks").innerHTML = keys
+      .map((k) => `<button type="button" data-color="${k}" aria-label="${k}" aria-pressed="${k === color}"
+        style="--s1:${LIST_COLORS[k][0]};--s2:${LIST_COLORS[k][1]}"></button>`)
+      .join("");
+  };
+  drawColors();
+  return modal(listDlg, {
+    onOpen: () => { if (list) listDlg.focus(); else listName.focus(); },
+    setup: ({ on, finish }) => {
+      on($("#emojiPicks"), "click", (e) => {
+        const b = e.target.closest("[data-emoji]");
+        if (b) listEmoji.value = b.dataset.emoji;
+      });
+      on($("#colorPicks"), "click", (e) => {
+        const b = e.target.closest("[data-color]");
+        if (b) { color = b.dataset.color; drawColors(); }
+      });
+      on($("#listForm"), "submit", (e) => {
+        e.preventDefault();
+        const name = listName.value.trim();
+        if (!name) { listName.focus(); return; }
+        finish({ name, emoji: firstSymbol(listEmoji.value), color });
+      });
+      on($("#listCancel"), "click", () => finish(null));
+    }
+  });
 }
-function setSort(listId, mode) {
-  try { localStorage.setItem("sort:" + listId, mode); } catch { /* ignore */ }
+
+// Appearance window: light/dark and accent color. Applies instantly.
+const themeDlg = $("#themeDialog");
+function openThemeDialog() {
+  const body = $("#themeBody");
+  const draw = () => {
+    const mode = getMode();
+    const accent = getAccent();
+    body.innerHTML = `<h2>Appearance</h2>
+      <div class="field"><span class="field-label">Mode</span>
+        <div class="segmented">${["auto", "light", "dark"]
+          .map((m) => `<button type="button" data-mode="${m}" aria-pressed="${m === mode}">${m[0].toUpperCase() + m.slice(1)}</button>`)
+          .join("")}</div></div>
+      <div class="field"><span class="field-label">Accent color</span>
+        <div class="color-picks">${ACCENT_KEYS
+          .map((k) => `<button type="button" data-accent="${k}" aria-label="${k}" aria-pressed="${k === accent}"
+            style="--s1:${LIST_COLORS[k][0]};--s2:${LIST_COLORS[k][1]}"></button>`)
+          .join("")}</div></div>
+      <div class="dialog-buttons"><button type="button" class="btn-primary" data-done>Done</button></div>`;
+  };
+  draw();
+  themeDlg.onclick = (e) => {
+    if (e.target === themeDlg) { themeDlg.close(); return; }
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.mode) { lsSet("theme-mode", b.dataset.mode); applyTheme(); draw(); }
+    else if (b.dataset.accent) { lsSet("theme-accent", b.dataset.accent); applyTheme(); draw(); }
+    else if (b.hasAttribute("data-done")) themeDlg.close();
+  };
+  themeDlg.showModal();
+  themeDlg.focus();
 }
 
 const sheet = $("#sheet");
@@ -229,6 +294,43 @@ function openSheet(title, items) {
     item.run();
   };
   sheet.showModal();
+  sheet.focus();
+}
+
+// A little celebration when the last task in a list is checked off.
+function confetti() {
+  if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const cv = document.createElement("canvas");
+  cv.className = "confetti";
+  document.body.appendChild(cv);
+  const dpr = window.devicePixelRatio || 1;
+  const w = (cv.width = Math.floor(innerWidth * dpr));
+  const h = (cv.height = Math.floor(innerHeight * dpr));
+  const ctx = cv.getContext("2d");
+  const colors = ["#7c4dff", "#ff5fa2", "#ffb020", "#22d3ee", "#34d399", "#ff7a59"];
+  const bits = Array.from({ length: 120 }, () => ({
+    x: w / 2, y: h * 0.7,
+    vx: (Math.random() - 0.5) * 15 * dpr, vy: (-Math.random() * 17 - 8) * dpr,
+    s: (Math.random() * 6 + 5) * dpr, r: Math.random() * 6.28, vr: (Math.random() - 0.5) * 0.4,
+    c: colors[Math.floor(Math.random() * colors.length)]
+  }));
+  const t0 = performance.now();
+  const life = 2300;
+  (function frame(t) {
+    const el = t - t0;
+    ctx.clearRect(0, 0, w, h);
+    for (const p of bits) {
+      p.vy += 0.5 * dpr; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.r);
+      ctx.fillStyle = p.c;
+      ctx.globalAlpha = Math.max(0, 1 - el / life);
+      ctx.fillRect(-p.s / 2, -p.s / 2, p.s, p.s * 0.6);
+      ctx.restore();
+    }
+    if (el < life) requestAnimationFrame(frame); else cv.remove();
+  })(t0);
 }
 
 /* ---------- Data listeners ---------- */
@@ -252,6 +354,7 @@ function startListeners() {
     (snap) => {
       state.tasks = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       state.tasksReady = true;
+      renderHeader();
       renderContent();
     },
     onListenError
@@ -288,13 +391,13 @@ function processPendingAdd(fromCache) {
 
 /* ---------- Data actions (writes are not awaited, so the UI stays instant offline) ---------- */
 
-function addList(name) {
+function addList({ name, emoji, color }) {
   const ref = doc(collection(db, "lists"));
-  setDoc(ref, { name, order: Date.now(), createdBy: state.user.email }).catch(handleError);
+  setDoc(ref, { name, emoji, color, order: Date.now(), createdBy: state.user.email }).catch(handleError);
   return ref.id;
 }
-function renameList(id, name) {
-  updateDoc(doc(db, "lists", id), { name }).catch(handleError);
+function updateList(id, fields) {
+  updateDoc(doc(db, "lists", id), fields).catch(handleError);
 }
 function commitDeletes(refs) {
   for (let i = 0; i < refs.length; i += 400) {
@@ -319,6 +422,12 @@ function addTask(listId, text, parentId) {
 function toggleTask(id) {
   const changes = toggleChanges(state.tasks, id);
   if (!changes.length) return;
+  const t = state.tasks.find((x) => x.id === id);
+  if (t && !t.done) {
+    state.pop = id;
+    if (navigator.vibrate) navigator.vibrate(8);
+    if (!t.parentId && openCount(state.tasks, t.listId) === 1) confetti();
+  }
   const batch = writeBatch(db);
   for (const c of changes) batch.update(doc(db, "tasks", c.id), { done: c.done, doneAt: c.doneAt });
   batch.commit().catch(handleError);
@@ -341,7 +450,7 @@ function renderAll() {
   if (!configured) return renderConfigMissing();
   if (state.user === undefined) {
     shellBuilt = false;
-    app.innerHTML = '<div class="empty">Loading…</div>';
+    app.innerHTML = '<div class="empty"><span class="big">✅</span>Loading…</div>';
     return;
   }
   if (state.user === null) return renderAuth();
@@ -364,7 +473,10 @@ function renderConfigMissing() {
 
 function renderAuth() {
   shellBuilt = false;
+  app.style.removeProperty("--c1");
+  app.style.removeProperty("--c2");
   app.innerHTML = `<form class="auth" id="authForm">
+    <div class="logo">✓</div>
     <h1>Our Lists</h1>
     <p>Sign in to see your shared lists.</p>
     <input id="authEmail" type="email" placeholder="Email" autocomplete="username" autocapitalize="none" required>
@@ -392,19 +504,61 @@ function authMessage(err) {
   }
 }
 
+function currentList() {
+  return state.lists.find((l) => l.id === state.route.listId) || null;
+}
+
 function renderHeader() {
   const h = $("#hdr");
   if (!h) return;
   const offline = navigator.onLine ? "" : '<span class="chip">Offline</span>';
+
   if (state.route.view === "lists") {
-    h.innerHTML = `<h1>Our Lists</h1>${offline}
-      <button class="icon-btn" data-action="account" aria-label="Account">⋯</button>`;
+    app.style.removeProperty("--c1");
+    app.style.removeProperty("--c2");
+    let stats = "";
+    if (state.listsReady && state.tasksReady) {
+      let open = 0, overdue = 0;
+      for (const l of state.lists) {
+        const s = listStats(state.tasks, l.id);
+        open += s.open;
+        overdue += s.overdue;
+      }
+      stats = open ? ` · <b>${open}</b> to do` : " · All clear";
+      if (overdue) stats += ` · <span class="warn">${overdue} overdue</span>`;
+    }
+    const date = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+    const initial = esc(((state.user && state.user.email) || "?").charAt(0).toUpperCase());
+    h.innerHTML = `<div class="hero">
+      <div class="hero-text"><div class="greet">${greeting()}</div><div class="hero-sub">${esc(date)}${stats}</div></div>
+      ${offline}
+      <button class="avatar" data-action="account" aria-label="Account and appearance">${initial}</button>
+    </div>`;
     return;
   }
-  const list = state.lists.find((l) => l.id === state.route.listId);
-  h.innerHTML = `<button class="icon-btn back-btn" data-action="back" aria-label="Back to lists">‹ Lists</button>
-    <h1>${esc(list ? list.name : "")}</h1>${offline}
-    <button class="icon-btn" data-action="listMenu" aria-label="List options">⋯</button>`;
+
+  const list = currentList();
+  if (list) {
+    const look = listLook(list);
+    app.style.setProperty("--c1", look.c1);
+    app.style.setProperty("--c2", look.c2);
+    const s = listStats(state.tasks, list.id);
+    const sub = !s.total ? "Nothing here yet" : `${s.open} to do${s.done ? ` · ${s.done} done` : ""}`;
+    const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
+    h.innerHTML = `<div class="banner">
+      <div class="banner-top">
+        <button class="icon-btn light back-btn" data-action="back" aria-label="Back to lists">‹ Lists</button>
+        <span class="spacer"></span>${offline ? offline.replace("chip", "chip light") : ""}
+        <button class="icon-btn light" data-action="listMenu" aria-label="List options">⋯</button>
+      </div>
+      <div class="banner-title"><span class="big-emoji">${esc(look.emoji)}</span><h1>${esc(list.name)}</h1></div>
+      <div class="banner-sub">${esc(sub)}</div>
+      <div class="progress"><span style="width:${pct}%"></span></div>
+    </div>`;
+  } else {
+    h.innerHTML = `<div class="banner"><div class="banner-top">
+      <button class="icon-btn light back-btn" data-action="back">‹ Lists</button></div></div>`;
+  }
 }
 
 function rowHtml(t, isSub) {
@@ -414,13 +568,13 @@ function rowHtml(t, isSub) {
   if (due) meta.push(`<span class="due ${t.done ? "later" : due.status}">${esc(due.label)}</span>`);
   if (t.note) meta.push(`<span class="note-preview">${esc(firstLine(t.note))}</span>`);
   return `<div class="${cls} ${t.done ? "is-done" : ""}">
-    <button class="check" data-action="toggle" data-id="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}"><span>✓</span></button>
+    <button class="check" data-action="toggle" data-id="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}"><span class="${state.pop === t.id ? "pop" : ""}">✓</span></button>
     <div class="task-text" data-action="details" data-id="${t.id}">
       <div>${esc(t.text)}</div>${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
     </div>`;
 }
 
-function blockHtml(g) {
+function blockHtml(g, i) {
   const t = g.task;
   const counter = g.subsTotal
     ? `<span class="sub-count">${g.subsTotal - g.subsOpen}/${g.subsTotal}</span>`
@@ -431,7 +585,7 @@ function blockHtml(g) {
         <button class="more" data-action="taskMenu" data-id="${s.id}" aria-label="More options">⋯</button></div></li>`
     )
     .join("");
-  return `<li class="task-block">${rowHtml(t, false)}${counter}
+  return `<li class="task-block" style="--i:${Math.min(i, 12)}">${rowHtml(t, false)}${counter}
       <button class="more" data-action="taskMenu" data-id="${t.id}" aria-label="More options">⋯</button></div>
       ${subs ? `<ul class="subs">${subs}</ul>` : ""}</li>`;
 }
@@ -444,30 +598,38 @@ function renderContent() {
     return;
   }
   if (!state.listsReady || !state.tasksReady) {
-    c.innerHTML = '<div class="empty">Loading…</div>';
+    c.innerHTML = '<div class="empty"><span class="big">✅</span>Loading…</div>';
     return;
   }
 
   if (state.route.view === "lists") {
     if (!state.lists.length) {
-      c.innerHTML = '<div class="empty">No lists yet.<br>Tap “New list” to start one.</div>';
+      c.innerHTML = '<div class="empty"><span class="big">🗒️</span>No lists yet.<br>Tap “New list” to start one.</div>';
       return;
     }
-    c.innerHTML = `<div class="card">${state.lists
-      .map(
-        (l) => `<button class="list-row" data-action="openList" data-id="${l.id}">
-          <span class="name">${esc(l.name)}</span>
-          <span class="count">${openCount(state.tasks, l.id) || ""}</span>
-          <span class="chev">›</span></button>`
-      )
+    const enter = state.enter;
+    state.enter = false;
+    c.innerHTML = `<div class="tiles ${enter ? "enter" : ""}">${state.lists
+      .map((l, i) => {
+        const look = listLook(l);
+        const s = listStats(state.tasks, l.id);
+        const meta = !s.total ? "Empty" : s.open ? `${s.open} to do` : "All done ✓";
+        const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
+        return `<button class="tile" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}" data-action="openList" data-id="${l.id}">
+          ${s.overdue ? `<span class="tile-badge">${s.overdue} overdue</span>` : ""}
+          <span class="tile-emoji">${esc(look.emoji)}</span>
+          <span class="tile-name">${esc(l.name)}</span>
+          <span class="tile-meta">${meta}</span>
+          <span class="progress"><span style="width:${pct}%"></span></span></button>`;
+      })
       .join("")}</div>`;
     return;
   }
 
-  const list = state.lists.find((l) => l.id === state.route.listId);
+  const list = currentList();
   if (!list) {
     if (state.pendingListId === state.route.listId) {
-      c.innerHTML = '<div class="empty">Loading…</div>';
+      c.innerHTML = '<div class="empty"><span class="big">✅</span>Loading…</div>';
       return;
     }
     toast("That list no longer exists.");
@@ -475,27 +637,31 @@ function renderContent() {
     return;
   }
   if (state.pendingListId === list.id) state.pendingListId = null;
+
   const { open, done } = groupTasks(state.tasks, list.id, getSort(list.id));
+  const enter = state.enter;
+  state.enter = false;
   let html = "";
   if (!open.length && !done.length) {
-    html = '<div class="empty">Nothing here yet.<br>Add your first task below.</div>';
+    html = `<div class="empty"><span class="big">${esc(listLook(list).emoji)}</span>Nothing here yet.<br>Add your first task below.</div>`;
   } else {
-    if (open.length) html += `<ul class="tasks card">${open.map(blockHtml).join("")}</ul>`;
-    else html += '<div class="empty">All done. 🎉</div>';
+    if (open.length) html += `<ul class="tasks ${enter ? "enter" : ""}">${open.map(blockHtml).join("")}</ul>`;
+    else html += '<div class="empty"><span class="big">🎉</span>All done!</div>';
     if (done.length) {
       const show = !!state.showDone[list.id];
       html += `<button class="section-toggle" data-action="toggleDone">${show ? "▾" : "▸"} Completed (${done.length})</button>`;
-      if (show) html += `<ul class="tasks card">${done.map(blockHtml).join("")}</ul>`;
+      if (show) html += `<ul class="tasks">${done.map(blockHtml).join("")}</ul>`;
     }
   }
   c.innerHTML = html;
+  state.pop = null;
 }
 
 function renderComposer() {
   const c = $("#composer");
   if (!c) return;
   if (state.route.view === "lists") {
-    c.innerHTML = '<button class="btn-primary btn-block" data-action="newList">+ New list</button>';
+    c.innerHTML = '<button class="btn-primary btn-block" data-action="newList">＋ New list</button>';
     return;
   }
   const parent =
@@ -563,9 +729,9 @@ app.addEventListener("click", async (e) => {
       break;
     }
     case "newList": {
-      const name = await askText("New list", "", "Create");
-      if (name) {
-        const newId = addList(name);
+      const r = await openListEditor({ title: "New list" });
+      if (r) {
+        const newId = addList(r);
         state.pendingListId = newId; // so we don't mistake it for a deleted list while it syncs in
         go(newId);
       }
@@ -609,23 +775,28 @@ app.addEventListener("click", async (e) => {
       renderComposer();
       break;
     case "listMenu": {
-      const list = state.lists.find((l) => l.id === state.route.listId);
+      const list = currentList();
       if (!list) break;
       const doneCount = state.tasks.filter((t) => t.listId === list.id && t.done).length;
       const sortMode = getSort(list.id);
       const items = [
         {
+          label: "Edit list (name, icon, color)",
+          run: async () => {
+            const r = await openListEditor({ title: "Edit list", list });
+            if (!r) return;
+            const changes = {};
+            if (r.name !== list.name) changes.name = r.name;
+            if (r.emoji !== (list.emoji || "")) changes.emoji = r.emoji;
+            if (r.color !== list.color) changes.color = r.color;
+            if (Object.keys(changes).length) updateList(list.id, changes);
+          }
+        },
+        {
           label: sortMode === "due" ? "Sort by order added" : "Sort by due date",
           run: () => {
             setSort(list.id, sortMode === "due" ? "added" : "due");
             renderContent();
-          }
-        },
-        {
-          label: "Rename list",
-          run: async () => {
-            const name = await askText("Rename list", list.name);
-            if (name && name !== list.name) renameList(list.id, name);
           }
         }
       ];
@@ -651,11 +822,12 @@ app.addEventListener("click", async (e) => {
           if (ok) { deleteList(list.id); go(null); }
         }
       });
-      openSheet(list.name, items);
+      openSheet(`${listLook(list).emoji} ${list.name}`, items);
       break;
     }
     case "account":
       openSheet(`Signed in as ${state.user.email}`, [
+        { label: "Appearance (light, dark, color)", run: openThemeDialog },
         { label: "Sign out", danger: true, run: () => signOut(auth).catch(handleError) }
       ]);
       break;
@@ -671,6 +843,7 @@ if (configured) {
   onAuthStateChanged(auth, (user) => {
     state.user = user;
     if (user) {
+      state.enter = true;
       startListeners();
     } else {
       stopListeners();

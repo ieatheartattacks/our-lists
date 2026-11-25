@@ -116,3 +116,69 @@ export function toggleChanges(tasks, taskId, now = Date.now()) {
   }
   return changes;
 }
+
+/* ---------- Look and feel helpers ---------- */
+
+export const LIST_COLORS = {
+  grape:  ["#7c4dff", "#b06cff"],
+  ocean:  ["#0ea5e9", "#6366f1"],
+  sunset: ["#ff7a59", "#ff3d81"],
+  mint:   ["#10b981", "#22d3ee"],
+  berry:  ["#e83e8c", "#ff8ad8"],
+  sun:    ["#f59e0b", "#ff7a3d"],
+  forest: ["#16a34a", "#84cc16"],
+  slate:  ["#475569", "#7c8aa5"]
+};
+export const ACCENT_KEYS = ["grape", "ocean", "sunset", "mint"];
+export const DEFAULT_EMOJI = "📋";
+
+function hashString(s) {
+  let h = 0;
+  for (const ch of String(s ?? "")) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return h;
+}
+
+// Colors and icon for a list. Lists without a chosen color get a stable one.
+export function listLook(list) {
+  const keys = Object.keys(LIST_COLORS);
+  const key = list && LIST_COLORS[list.color] ? list.color : keys[hashString(list && list.id) % keys.length];
+  const [c1, c2] = LIST_COLORS[key];
+  return { key, c1, c2, emoji: (list && list.emoji) || DEFAULT_EMOJI };
+}
+
+function dayString(now) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
+
+// Counts for one list: unfinished and finished top-level tasks, and how many
+// unfinished ones are overdue.
+export function listStats(tasks, listId, now = new Date()) {
+  const today = dayString(now);
+  let open = 0, done = 0, overdue = 0;
+  for (const t of tasks) {
+    if (t.listId !== listId || t.parentId) continue;
+    if (t.done) done++;
+    else {
+      open++;
+      if (t.due && t.due < today) overdue++;
+    }
+  }
+  return { open, done, overdue, total: open + done };
+}
+
+export function greeting(now = new Date()) {
+  const h = now.getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
+
+// Keeps just the first emoji (or character) someone typed or pasted.
+export function firstSymbol(text) {
+  const s = String(text ?? "").trim();
+  if (!s) return "";
+  if (typeof Intl !== "undefined" && Intl.Segmenter) {
+    const first = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)[Symbol.iterator]().next();
+    return first.done ? "" : first.value.segment;
+  }
+  return Array.from(s).slice(0, 2).join("");
+}

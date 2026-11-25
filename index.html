@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-mode="auto">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Our Lists</title>
-  <meta name="theme-color" content="#2f6fed">
+  <meta name="theme-color" id="themeColorMeta" content="#7c4dff">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Our Lists">
@@ -17,6 +17,7 @@
 <body>
   <div id="app" aria-live="polite"></div>
   <div id="toast" role="status"></div>
+
   <dialog id="dialog">
     <form method="dialog" id="dialogForm">
       <h2 id="dialogTitle"></h2>
@@ -28,6 +29,7 @@
       </div>
     </form>
   </dialog>
+
   <dialog id="detailDialog" tabindex="-1">
     <form id="detailForm">
       <h2>Task details</h2>
@@ -49,9 +51,37 @@
       </div>
     </form>
   </dialog>
-  <dialog id="sheet">
+
+  <dialog id="listDialog" tabindex="-1">
+    <form id="listForm">
+      <h2 id="listDialogTitle">New list</h2>
+      <label>Name
+        <input id="listName" type="text" maxlength="60" autocomplete="off" autocapitalize="words">
+      </label>
+      <div class="field">
+        <span class="field-label">Icon</span>
+        <input id="listEmoji" type="text" maxlength="12" autocomplete="off" aria-label="Icon (any emoji)">
+        <div id="emojiPicks" class="emoji-picks"></div>
+      </div>
+      <div class="field">
+        <span class="field-label">Color</span>
+        <div id="colorPicks" class="color-picks"></div>
+      </div>
+      <div class="dialog-buttons">
+        <button type="button" id="listCancel" class="btn-ghost">Cancel</button>
+        <button type="submit" id="listSave" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="themeDialog" tabindex="-1">
+    <div id="themeBody"></div>
+  </dialog>
+
+  <dialog id="sheet" tabindex="-1">
     <div id="sheetBody"></div>
   </dialog>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>
