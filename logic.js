@@ -12,9 +12,36 @@ export function sortLists(lists) {
   return [...lists].sort((a, b) => byOrder(a, b) || String(a.name).localeCompare(String(b.name)));
 }
 
+// Turns a due date string like "2026-12-05" into a short label and a status
+// ("overdue", "today", "soon", "later") for display.
+export function formatDue(due, now = new Date()) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(due || "");
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((d - today) / 86400000);
+  const short = d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() !== today.getFullYear() ? { year: "numeric" } : {})
+  });
+  if (diff < 0) return { label: diff === -1 ? "Yesterday" : short, status: "overdue", diff };
+  if (diff === 0) return { label: "Today", status: "today", diff };
+  if (diff === 1) return { label: "Tomorrow", status: "soon", diff };
+  if (diff < 7) return { label: d.toLocaleDateString("en-US", { weekday: "long" }), status: "soon", diff };
+  return { label: short, status: "later", diff };
+}
+
+// First non-empty line of a note, for the preview under a task.
+export function firstLine(note) {
+  return String(note ?? "").split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "";
+}
+
 // Splits one list's tasks into open and completed top-level tasks,
 // each with its subtasks attached (open subtasks first, finished ones last).
-export function groupTasks(tasks, listId) {
+// sortMode "due" puts the soonest due date first (no date goes last);
+// anything else keeps the order tasks were added.
+export function groupTasks(tasks, listId, sortMode = "added") {
   const inList = tasks.filter((t) => t.listId === listId);
   const top = inList.filter((t) => !t.parentId);
   const subsByParent = new Map();
@@ -32,7 +59,11 @@ export function groupTasks(tasks, listId) {
       subsTotal: subs.length
     };
   };
-  const open = top.filter((t) => !t.done).sort(byOrder).map(withSubs);
+  const dueKey = (t) => t.due || "9999-12-31";
+  const cmp = sortMode === "due"
+    ? (a, b) => dueKey(a).localeCompare(dueKey(b)) || byOrder(a, b)
+    : byOrder;
+  const open = top.filter((t) => !t.done).sort(cmp).map(withSubs);
   const done = top
     .filter((t) => t.done)
     .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))

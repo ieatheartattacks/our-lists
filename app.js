@@ -9,7 +9,7 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 import {
   esc, sortLists, groupTasks, openCount, findListByName, parseAddParams,
-  idsToDelete, toggleChanges
+  idsToDelete, toggleChanges, formatDue, firstLine
 } from "./logic.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -145,6 +145,73 @@ const askText = (title, value = "", okLabel = "Save") =>
 const confirmBox = (title, message, okLabel = "Delete") =>
   openDialog({ title, message, okLabel, danger: true });
 
+const detDlg = $("#detailDialog");
+const detForm = $("#detailForm");
+const detText = $("#detailText");
+const detDue = $("#detailDue");
+const detNote = $("#detailNote");
+const detCancel = $("#detailCancel");
+const detClear = $("#detailClearDue");
+
+// Edit a task's text, due date and note. Resolves to { text, due, note } or null.
+function openDetails(task) {
+  return new Promise((resolve) => {
+    detText.value = task.text;
+    detDue.value = task.due || "";
+    detNote.value = task.note || "";
+
+    let settled = false;
+    const cleanup = () => {
+      detForm.removeEventListener("submit", onSubmit);
+      detCancel.removeEventListener("click", onCancel);
+      detClear.removeEventListener("click", onClear);
+      detDlg.removeEventListener("cancel", onCancel);
+      detDlg.removeEventListener("close", onCancel);
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (detDlg.open) detDlg.close();
+      resolve(result);
+    };
+    function onSubmit(e) {
+      e.preventDefault();
+      const text = detText.value.trim();
+      if (!text) { detText.focus(); return; }
+      finish({ text, due: detDue.value || null, note: detNote.value.trim() });
+    }
+    function onCancel() { finish(null); }
+    function onClear() { detDue.value = ""; }
+
+    detForm.addEventListener("submit", onSubmit);
+    detCancel.addEventListener("click", onCancel);
+    detClear.addEventListener("click", onClear);
+    detDlg.addEventListener("cancel", onCancel);
+    detDlg.addEventListener("close", onCancel);
+    detDlg.showModal();
+    detDlg.focus(); // don't pop the phone keyboard open until she taps a field
+  });
+}
+
+async function editDetails(task) {
+  const r = await openDetails(task);
+  if (!r) return;
+  const changes = {};
+  if (r.text !== task.text) changes.text = r.text;
+  if (r.due !== (task.due || null)) changes.due = r.due;
+  if (r.note !== (task.note || "")) changes.note = r.note;
+  if (Object.keys(changes).length) updateTask(task.id, changes);
+}
+
+// Sort choice (added order vs due date) is remembered per list on this phone.
+function getSort(listId) {
+  try { return localStorage.getItem("sort:" + listId) === "due" ? "due" : "added"; } catch { return "added"; }
+}
+function setSort(listId, mode) {
+  try { localStorage.setItem("sort:" + listId, mode); } catch { /* ignore */ }
+}
+
 const sheet = $("#sheet");
 const sheetBody = $("#sheetBody");
 function openSheet(title, items) {
@@ -256,8 +323,8 @@ function toggleTask(id) {
   for (const c of changes) batch.update(doc(db, "tasks", c.id), { done: c.done, doneAt: c.doneAt });
   batch.commit().catch(handleError);
 }
-function renameTask(id, text) {
-  updateDoc(doc(db, "tasks", id), { text }).catch(handleError);
+function updateTask(id, fields) {
+  updateDoc(doc(db, "tasks", id), fields).catch(handleError);
 }
 function deleteTask(id) {
   commitDeletes(idsToDelete(state.tasks, id).map((tid) => doc(db, "tasks", tid)));
@@ -342,9 +409,15 @@ function renderHeader() {
 
 function rowHtml(t, isSub) {
   const cls = isSub ? "sub" : "task";
+  const due = t.due ? formatDue(t.due) : null;
+  const meta = [];
+  if (due) meta.push(`<span class="due ${t.done ? "later" : due.status}">${esc(due.label)}</span>`);
+  if (t.note) meta.push(`<span class="note-preview">${esc(firstLine(t.note))}</span>`);
   return `<div class="${cls} ${t.done ? "is-done" : ""}">
     <button class="check" data-action="toggle" data-id="${t.id}" aria-label="${t.done ? "Mark not done" : "Mark done"}"><span>✓</span></button>
-    <div class="task-text" data-action="rename" data-id="${t.id}">${esc(t.text)}</div>`;
+    <div class="task-text" data-action="details" data-id="${t.id}">
+      <div>${esc(t.text)}</div>${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
+    </div>`;
 }
 
 function blockHtml(g) {
@@ -402,7 +475,7 @@ function renderContent() {
     return;
   }
   if (state.pendingListId === list.id) state.pendingListId = null;
-  const { open, done } = groupTasks(state.tasks, list.id);
+  const { open, done } = groupTasks(state.tasks, list.id, getSort(list.id));
   let html = "";
   if (!open.length && !done.length) {
     html = '<div class="empty">Nothing here yet.<br>Add your first task below.</div>';
@@ -498,15 +571,14 @@ app.addEventListener("click", async (e) => {
       }
       break;
     }
-    case "rename": {
+    case "details": {
       if (!task) break;
-      const text = await askText("Edit task", task.text);
-      if (text && text !== task.text) renameTask(task.id, text);
+      editDetails(task);
       break;
     }
     case "taskMenu": {
       if (!task) break;
-      const items = [];
+      const items = [{ label: "Edit details (due date, note)", run: () => editDetails(task) }];
       if (!task.parentId) {
         items.push({
           label: "Add subtask",
@@ -516,13 +588,6 @@ app.addEventListener("click", async (e) => {
           }
         });
       }
-      items.push({
-        label: "Rename",
-        run: async () => {
-          const text = await askText("Edit task", task.text);
-          if (text && text !== task.text) renameTask(task.id, text);
-        }
-      });
       items.push({
         label: "Delete",
         danger: true,
@@ -547,7 +612,15 @@ app.addEventListener("click", async (e) => {
       const list = state.lists.find((l) => l.id === state.route.listId);
       if (!list) break;
       const doneCount = state.tasks.filter((t) => t.listId === list.id && t.done).length;
+      const sortMode = getSort(list.id);
       const items = [
+        {
+          label: sortMode === "due" ? "Sort by order added" : "Sort by due date",
+          run: () => {
+            setSort(list.id, sortMode === "due" ? "added" : "due");
+            renderContent();
+          }
+        },
         {
           label: "Rename list",
           run: async () => {

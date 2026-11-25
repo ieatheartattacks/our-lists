@@ -28,6 +28,27 @@
       </div>
     </form>
   </dialog>
+  <dialog id="detailDialog" tabindex="-1">
+    <form id="detailForm">
+      <h2>Task details</h2>
+      <label>Task
+        <input id="detailText" type="text" maxlength="200" autocomplete="off">
+      </label>
+      <label>Due date
+        <span class="date-row">
+          <input id="detailDue" type="date">
+          <button type="button" id="detailClearDue" class="btn-ghost">Clear</button>
+        </span>
+      </label>
+      <label>Note
+        <textarea id="detailNote" rows="5" maxlength="2000" placeholder="Add a note"></textarea>
+      </label>
+      <div class="dialog-buttons">
+        <button type="button" id="detailCancel" class="btn-ghost">Cancel</button>
+        <button type="submit" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="sheet">
     <div id="sheetBody"></div>
   </dialog>

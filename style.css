@@ -326,3 +326,46 @@ dialog#sheet {
   z-index: 50;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Due dates and notes */
+.task-text .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 2px; font-size: 13px; text-decoration: none; }
+.is-done .meta { text-decoration: none; }
+.due {
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: var(--line);
+  color: var(--muted);
+  font-weight: 600;
+}
+.due.overdue { background: rgba(217, 48, 37, 0.14); color: var(--danger); }
+.due.today { background: rgba(47, 111, 237, 0.16); color: var(--accent); }
+.due.soon { color: var(--text); }
+.note-preview {
+  color: var(--muted);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Details dialog */
+dialog#detailDialog { max-height: 90dvh; overflow-y: auto; }
+#detailForm { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+#detailForm h2 { margin: 0; font-size: 18px; }
+#detailForm label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+#detailForm input[type="text"], #detailForm input[type="date"], #detailForm textarea {
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 400;
+  min-height: 46px;
+  width: 100%;
+}
+#detailForm textarea { resize: vertical; min-height: 110px; }
+.date-row { display: flex; gap: 8px; align-items: center; }
+.date-row input { flex: 1; min-width: 0; }
