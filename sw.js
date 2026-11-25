@@ -1,6 +1,6 @@
 // Service worker: lets the app open offline and load faster.
 // Bump CACHE_VERSION whenever you upload a new version of the app files.
-const CACHE_VERSION = "v6";
+const CACHE_VERSION = "v7";
 const SHELL_CACHE = "shell-" + CACHE_VERSION;
 const CDN_CACHE = "cdn-" + CACHE_VERSION;
 const SHELL = [

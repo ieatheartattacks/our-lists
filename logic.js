@@ -285,3 +285,172 @@ export function canMakePrivate(list, email) {
   if (!list || !list.createdBy) return true;
   return list.createdBy === email;
 }
+
+/* ---------- Repeating tasks ---------- */
+
+export const REPEATS = {
+  daily:    "Every day",
+  weekdays: "Every weekday",
+  weekly:   "Every week",
+  biweekly: "Every 2 weeks",
+  monthly:  "Every month",
+  yearly:   "Every year"
+};
+
+function ymd(d) { return dayString(d); }
+
+// Adds k calendar months, clamping the day (Jan 31 + 1 month = Feb 28/29).
+function addMonths(d, k) {
+  const day = d.getDate();
+  const r = new Date(d.getFullYear(), d.getMonth() + k, 1);
+  const last = new Date(r.getFullYear(), r.getMonth() + 1, 0).getDate();
+  r.setDate(Math.min(day, last));
+  return r;
+}
+
+// The next due date for a repeating task, as "YYYY-MM-DD".
+// It is always the first date in the pattern that is after both the old due
+// date and today, so finishing a task that is weeks overdue doesn't leave the
+// next one overdue as well, and finishing early doesn't skip a turn.
+export function nextDue(due, repeat, today = new Date()) {
+  const start = parseDay(due);
+  if (!start || !REPEATS[repeat]) return null;
+  const todayStr = ymd(today);
+  const after = (d) => ymd(d) > todayStr && ymd(d) > due;
+  const step = (n) => { const d = new Date(start); d.setDate(d.getDate() + n); return d; };
+  for (let k = 1; k < 4000; k++) {
+    let d;
+    if (repeat === "daily") d = step(k);
+    else if (repeat === "weekly") d = step(7 * k);
+    else if (repeat === "biweekly") d = step(14 * k);
+    else if (repeat === "monthly") d = addMonths(start, k);
+    else if (repeat === "yearly") d = addMonths(start, 12 * k);
+    else { // weekdays: next Mon-Fri after the old due date / today
+      d = step(k);
+      if (d.getDay() === 0 || d.getDay() === 6) continue;
+    }
+    if (after(d)) return ymd(d);
+  }
+  return null;
+}
+
+// Writes for checking off a repeating task: instead of finishing, it moves to
+// its next date and its subtasks are un-checked ready for the next round.
+// Returns null when the task doesn't repeat (use toggleChanges instead).
+export function repeatChanges(tasks, taskId, today = new Date()) {
+  const t = tasks.find((x) => x.id === taskId);
+  if (!t || t.done || t.parentId || !t.repeat || !t.due) return null;
+  const due = nextDue(t.due, t.repeat, today);
+  if (!due) return null;
+  const changes = [{ id: t.id, fields: { due, done: false, doneAt: null } }];
+  for (const s of tasks) {
+    if (s.parentId === t.id && s.done) changes.push({ id: s.id, fields: { done: false, doneAt: null } });
+  }
+  return { changes, due };
+}
+
+/* ---------- Search ---------- */
+
+// Finds tasks (and subtasks) across the given lists whose text, note or list
+// name contains every word typed. Open tasks come before finished ones.
+export function searchTasks(tasks, lists, queryText, limit = 100) {
+  const words = String(queryText ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const listById = new Map(lists.map((l) => [l.id, l]));
+  const listOrder = new Map(lists.map((l, i) => [l.id, i]));
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  const out = [];
+  for (const t of tasks) {
+    const list = listById.get(t.listId);
+    if (!list) continue;
+    const hay = `${t.text} ${t.note || ""} ${list.name}`.toLowerCase();
+    if (!words.every((w) => hay.includes(w))) continue;
+    out.push({ task: t, list, parent: t.parentId ? taskById.get(t.parentId) || null : null });
+  }
+  out.sort((a, b) =>
+    (a.task.done ? 1 : 0) - (b.task.done ? 1 : 0) ||
+    listOrder.get(a.list.id) - listOrder.get(b.list.id) ||
+    (a.task.order || 0) - (b.task.order || 0));
+  return out.slice(0, limit);
+}
+
+/* ---------- Drag to reorder ---------- */
+
+// The new `order` value for a task dropped at position toIndex among its
+// siblings (the siblings listed WITHOUT the moved task, in display order).
+export function orderForMove(siblings, movedOrder, toIndex) {
+  const prev = siblings[toIndex - 1];
+  const next = siblings[toIndex];
+  if (prev && next) return (prev.order + next.order) / 2;
+  if (prev) return prev.order + 1000;
+  if (next) return next.order - 1000;
+  return movedOrder;
+}
+
+/* ---------- Assigned to me ---------- */
+
+// Unfinished tasks assigned to this person, grouped by list.
+// keepIds keeps just-finished ones visible until you leave the screen.
+export function mineGroups(tasks, lists, email, keepIds = new Set()) {
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  const groups = [];
+  for (const list of lists) {
+    const items = [];
+    for (const t of tasks) {
+      if (t.listId !== list.id || !email || t.assignee !== email) continue;
+      if (t.done && !keepIds.has(t.id)) continue;
+      const parent = t.parentId ? taskById.get(t.parentId) || null : null;
+      if (t.parentId && !parent) continue;
+      items.push({ task: t, list, parent });
+    }
+    items.sort((a, b) =>
+      (a.task.due || "9999-12-31").localeCompare(b.task.due || "9999-12-31") ||
+      (a.task.order || 0) - (b.task.order || 0));
+    if (items.length) groups.push({ list, items });
+  }
+  return groups;
+}
+
+export function mineCount(tasks, lists, email) {
+  return mineGroups(tasks, lists, email).reduce((n, g) => n + g.items.length, 0);
+}
+
+/* ---------- People ---------- */
+
+// "tyler.smith@x.com" -> "Tyler". Used until someone sets a display name.
+export function nameFromEmail(email) {
+  const local = String(email || "").split("@")[0].replace(/[0-9_+.-]+/g, " ").trim().split(/\s+/)[0] || "";
+  return local ? local[0].toUpperCase() + local.slice(1).toLowerCase() : "Someone";
+}
+
+/* ---------- What changed while you were away ---------- */
+
+// Counts what the OTHER person did in a list since `since` (ms): tasks they
+// added, tasks they finished, and tasks they assigned to you.
+export function activitySince(tasks, listId, me, since) {
+  const r = { added: 0, finished: 0, assigned: 0, who: [] };
+  const who = new Set();
+  for (const t of tasks) {
+    if (t.listId !== listId) continue;
+    if (t.createdBy && t.createdBy !== me && (t.createdAt || 0) > since) { r.added++; who.add(t.createdBy); }
+    if (t.done && t.doneBy && t.doneBy !== me && (t.doneAt || 0) > since) { r.finished++; who.add(t.doneBy); }
+    else if (!t.done && t.lastDoneBy && t.lastDoneBy !== me && (t.lastDoneAt || 0) > since) { r.finished++; who.add(t.lastDoneBy); } // a repeating task they ticked off
+    if (t.assignee === me && t.assignedBy && t.assignedBy !== me && (t.assignedAt || 0) > since) {
+      r.assigned++; who.add(t.assignedBy);
+    }
+  }
+  r.who = [...who];
+  return r;
+}
+
+// "Tyler added 2, finished 1 and assigned you 1"  (empty string when nothing happened)
+export function activitySummary(act, nameOf = (e) => e) {
+  if (!act || !(act.added || act.finished || act.assigned)) return "";
+  const parts = [];
+  if (act.added) parts.push(`added ${act.added}`);
+  if (act.finished) parts.push(`finished ${act.finished}`);
+  if (act.assigned) parts.push(`assigned you ${act.assigned}`);
+  const text = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  const who = act.who.map(nameOf).join(" & ") || "Someone";
+  return `${who} ${text}`;
+}
