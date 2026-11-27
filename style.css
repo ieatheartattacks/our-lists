@@ -808,3 +808,6 @@ li.dragging { position: relative; z-index: 5; transition: none !important; box-s
 .tile.moving { opacity: 0.3; }
 .tile-ghost { position: fixed; z-index: 100; margin: 0; pointer-events: none; transform: scale(1.04) rotate(1.5deg); box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35); animation: none !important; }
 .tile-ghost .tile-grip { display: none; }
+
+.tile-grip, .grip { -webkit-touch-callout: none; -webkit-user-drag: none; }
+div.tile.reorder { text-align: left; }

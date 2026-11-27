@@ -987,12 +987,13 @@ function renderContent() {
         const fresh = act ? act.added + act.finished + act.assigned : 0;
         const meta = (l.private ? "🔒 " : "") + (!s.total ? "Empty" : s.open ? `${s.open} to do` : "All done ✓") + (fresh ? ` · ✨ ${fresh} new` : "");
         const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
-        return `<button class="tile ${state.reorder ? "reorder" : ""}" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}" ${state.reorder ? "" : 'data-action="openList"'} data-id="${l.id}">
+        const tag = state.reorder ? "div" : "button";
+        return `<${tag} class="tile ${state.reorder ? "reorder" : ""}" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}" ${state.reorder ? "" : 'data-action="openList"'} data-id="${l.id}">
           ${state.reorder ? '<span class="tile-grip" data-tilegrip aria-label="Drag to move" role="img">⠿</span>' : s.overdue ? `<span class="tile-badge">${s.overdue} overdue</span>` : ""}
           <span class="tile-emoji">${esc(look.emoji)}</span>
           <span class="tile-name">${esc(l.name)}</span>
           <span class="tile-meta">${meta}</span>
-          <span class="progress"><span style="width:${pct}%"></span></span></button>`;
+          <span class="progress"><span style="width:${pct}%"></span></span></${tag}>`;
       })
       .join("")}</div>`;
     return;
@@ -1255,6 +1256,9 @@ app.addEventListener("input", (e) => {
     renderContent();
   }
 });
+
+// iPhone Safari can still scroll the page while you drag unless touchmove is cancelled explicitly.
+app.addEventListener("touchmove", (e) => { if (state.dragging && e.cancelable) e.preventDefault(); }, { passive: false });
 
 /* ---------- Drag list tiles (this phone only) ---------- */
 
