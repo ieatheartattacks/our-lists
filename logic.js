@@ -454,3 +454,14 @@ export function activitySummary(act, nameOf = (e) => e) {
   const who = act.who.map(nameOf).join(" & ") || "Someone";
   return `${who} ${text}`;
 }
+
+/* ---------- Your own list order (kept per phone) ---------- */
+
+// Puts lists in the order saved on this phone. Lists not in the saved order
+// (for example a brand new one) keep their normal order and go after the others.
+export function applyListOrder(lists, savedIds) {
+  const rank = new Map((Array.isArray(savedIds) ? savedIds : []).map((id, i) => [id, i]));
+  const known = lists.filter((l) => rank.has(l.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id));
+  const fresh = lists.filter((l) => !rank.has(l.id));
+  return [...known, ...fresh];
+}

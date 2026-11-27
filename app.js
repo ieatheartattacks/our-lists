@@ -11,7 +11,7 @@ import {
   esc, sortLists, groupTasks, openCount, findListByName, parseAddParams,
   idsToDelete, toggleChanges, formatDue, firstLine,
   LIST_COLORS, ACCENT_KEYS, listLook, listStats, greeting, firstSymbol, agendaGroups, agendaCounts, googleCalendarUrl, canSee, canMakePrivate,
-  REPEATS, repeatChanges, searchTasks, orderForMove, mineGroups, mineCount, nameFromEmail, activitySince, activitySummary, dayString
+  REPEATS, repeatChanges, searchTasks, orderForMove, mineGroups, mineCount, nameFromEmail, activitySince, activitySummary, dayString, applyListOrder
 } from "./logic.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -59,6 +59,7 @@ const state = {
   query: "",            // search text
   sinceSeen: {},        // listId -> when you last looked (ms), captured when you open the list
   dragging: false,
+  reorder: false,       // home screen: reordering the list tiles (this phone only)
   agendaDone: new Set() // tasks checked off while viewing Today / Next 7 days (kept visible until you leave)
 };
 let shellBuilt = false;
@@ -105,6 +106,10 @@ function parseRoute() {
 function go(listId) {
   location.hash = listId ? "#l=" + encodeURIComponent(listId) : "";
 }
+// The order of your list tiles is stored on THIS phone only; the other person keeps their own.
+function getListOrder() { try { return JSON.parse(lsGet("list-order") || "[]"); } catch { return []; } }
+function ordered(lists) { return applyListOrder(lists, getListOrder()); }
+
 // Remembers when you last looked at each list (per phone) so we can tell you what the other person did.
 const seenAt = (listId) => Number(lsGet("seen:" + listId)) || null;
 const markSeen = (listId) => lsSet("seen:" + listId, String(Date.now()));
@@ -125,6 +130,7 @@ window.addEventListener("hashchange", () => {
   const prevView = prevRoute.view;
   state.route = parseRoute();
   onRouteChange(prevRoute, state.route);
+  state.reorder = false;
   if (state.route.view === "agenda" && prevView !== "agenda") state.agendaDone.clear();
   state.composer = { mode: "task", parentId: null };
   state.enter = true;
@@ -509,7 +515,7 @@ function startListeners() {
     query(collection(db, "lists")),
     (snap) => {
       const me = state.user && state.user.email;
-      state.lists = sortLists(snap.docs.map((d) => ({ id: d.id, ...d.data() }))).filter((l) => canSee(l, me));
+      state.lists = ordered(sortLists(snap.docs.map((d) => ({ id: d.id, ...d.data() }))).filter((l) => canSee(l, me)));
       state.listsReady = true;
       state.fatal = null;
       for (const l of state.lists) if (!seenAt(l.id)) markSeen(l.id); // first sight: don't flag old tasks as new
@@ -968,7 +974,11 @@ function renderContent() {
         <span class="smart-icon">🙋</span><span class="smart-count">${mineCount(state.tasks, state.lists, myEmail())}</span>
         <span class="smart-label">Assigned to me</span></button>` : ""}
     </div>`;
-    c.innerHTML = `${smart}<div class="tiles ${enter ? "enter" : ""}">${state.lists
+    const head = state.lists.length > 1
+      ? `<div class="tiles-head"><span>${state.reorder ? "Drag ⠿ to rearrange (only on this phone)" : "Your lists"}</span>
+          <button data-action="toggleReorder">${state.reorder ? "Done" : "⇅ Reorder"}</button></div>`
+      : "";
+    c.innerHTML = `${smart}${head}<div class="tiles ${enter ? "enter" : ""}" id="tiles">${state.lists
       .map((l, i) => {
         const look = listLook(l);
         const s = listStats(state.tasks, l.id);
@@ -977,8 +987,8 @@ function renderContent() {
         const fresh = act ? act.added + act.finished + act.assigned : 0;
         const meta = (l.private ? "🔒 " : "") + (!s.total ? "Empty" : s.open ? `${s.open} to do` : "All done ✓") + (fresh ? ` · ✨ ${fresh} new` : "");
         const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
-        return `<button class="tile" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}" data-action="openList" data-id="${l.id}">
-          ${s.overdue ? `<span class="tile-badge">${s.overdue} overdue</span>` : ""}
+        return `<button class="tile ${state.reorder ? "reorder" : ""}" style="--c1:${look.c1};--c2:${look.c2};--i:${Math.min(i, 12)}" ${state.reorder ? "" : 'data-action="openList"'} data-id="${l.id}">
+          ${state.reorder ? '<span class="tile-grip" data-tilegrip aria-label="Drag to move" role="img">⠿</span>' : s.overdue ? `<span class="tile-badge">${s.overdue} overdue</span>` : ""}
           <span class="tile-emoji">${esc(look.emoji)}</span>
           <span class="tile-name">${esc(l.name)}</span>
           <span class="tile-meta">${meta}</span>
@@ -1093,6 +1103,7 @@ app.addEventListener("click", async (e) => {
     case "openList": go(id); break;
     case "openAgenda": location.hash = "#a=" + el.dataset.tab; break;
     case "openSearch": location.hash = "#s"; break;
+    case "toggleReorder": state.reorder = !state.reorder; state.enter = false; renderContent(); break;
     case "dismissActivity":
       delete state.sinceSeen[state.route.listId];
       renderContent();
@@ -1243,6 +1254,68 @@ app.addEventListener("input", (e) => {
     state.query = e.target.value;
     renderContent();
   }
+});
+
+/* ---------- Drag list tiles (this phone only) ---------- */
+
+app.addEventListener("pointerdown", (e) => {
+  const grip = e.target.closest("[data-tilegrip]");
+  if (!grip || (e.pointerType === "mouse" && e.button !== 0)) return;
+  e.preventDefault();
+  const tile = grip.closest(".tile");
+  const grid = tile && tile.parentElement;
+  if (!grid) return;
+  const scroller = $("#content");
+  const r = tile.getBoundingClientRect();
+  const offX = e.clientX - r.left;
+  const offY = e.clientY - r.top;
+  // A floating copy follows the finger; the real tile (faded) slides into its new spot.
+  const ghost = tile.cloneNode(true);
+  ghost.classList.add("tile-ghost");
+  ghost.style.cssText += `;width:${r.width}px;height:${r.height}px;left:${r.left}px;top:${r.top}px`;
+  document.body.appendChild(ghost);
+  tile.classList.add("moving");
+  state.dragging = true;
+  try { grip.setPointerCapture(e.pointerId); } catch { /* synthetic events in tests */ }
+  if (navigator.vibrate) navigator.vibrate(6);
+  let cx = e.clientX, cy = e.clientY;
+
+  const place = () => {
+    ghost.style.left = `${cx - offX}px`;
+    ghost.style.top = `${cy - offY}px`;
+    const tiles = [...grid.children];
+    const over = tiles.find((t) => {
+      if (t === tile) return false;
+      const b = t.getBoundingClientRect();
+      return cx >= b.left && cx <= b.right && cy >= b.top && cy <= b.bottom;
+    });
+    if (over) grid.insertBefore(tile, tiles.indexOf(over) > tiles.indexOf(tile) ? over.nextSibling : over);
+  };
+  const timer = setInterval(() => {
+    const b = scroller.getBoundingClientRect();
+    if (cy < b.top + 70) scroller.scrollTop -= 12;
+    else if (cy > b.bottom - 70) scroller.scrollTop += 12;
+    else return;
+    place();
+  }, 16);
+  const move = (ev) => { cx = ev.clientX; cy = ev.clientY; place(); };
+  const end = (ev) => {
+    clearInterval(timer);
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", end);
+    grip.removeEventListener("pointercancel", end);
+    ghost.remove();
+    tile.classList.remove("moving");
+    state.dragging = false;
+    if (ev.type === "pointerup") {
+      lsSet("list-order", JSON.stringify([...grid.children].map((t) => t.dataset.id)));
+      state.lists = ordered(state.lists);
+    }
+    renderContent();
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
 });
 
 /* ---------- Drag to reorder ---------- */

@@ -781,3 +781,30 @@ li.dragging { position: relative; z-index: 5; transition: none !important; box-s
 .activity button { flex: none; width: 34px; height: 34px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font-size: 15px; }
 @media (prefers-reduced-motion: reduce) { .is-dragging .task-block, .is-dragging > li { transition: none; } }
 #detailForm .cal-hint { font-weight: 500; }
+
+/* ---------- Rearranging list tiles ---------- */
+.tiles-head { display: flex; align-items: center; justify-content: space-between; margin: 4px 4px 10px; font-size: 14px; font-weight: 800; color: var(--muted); }
+.tiles-head button { border: 0; border-radius: 999px; padding: 8px 14px; background: var(--card); box-shadow: var(--shadow-sm); color: var(--accent); font-weight: 800; font-size: 14px; }
+.tile.reorder { cursor: default; }
+.tile.reorder:active { transform: none; }
+.tile-grip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.28);
+  color: #fff;
+  font-size: 22px;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tile.moving { opacity: 0.3; }
+.tile-ghost { position: fixed; z-index: 100; margin: 0; pointer-events: none; transform: scale(1.04) rotate(1.5deg); box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35); animation: none !important; }
+.tile-ghost .tile-grip { display: none; }
